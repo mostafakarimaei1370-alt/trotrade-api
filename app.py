@@ -9,6 +9,11 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 
+# Dry-run settings
+ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "150"))
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "3"))
+LEVERAGE = int(os.getenv("LEVERAGE", "20"))
+
 
 def parse_signal(text):
     signal = {}
@@ -18,7 +23,6 @@ def parse_signal(text):
     entry = re.search(r"Entry\s+(?:Market|Limit):\s*([\d.]+)", text, re.I)
     stop_loss = re.search(r"SL:\s*([\d.]+)", text, re.I)
     signal_id = re.search(r"#S(\d+)", text, re.I)
-
     tps = re.findall(r"TP\d+:\s*([\d.]+)", text, re.I)
 
     if signal_id:
@@ -42,6 +46,49 @@ def parse_signal(text):
     return signal
 
 
+def validate_signal(signal):
+    entry = signal.get("entry")
+    sl = signal.get("stop_loss")
+    side = signal.get("position")
+
+    if not entry or not sl or not side:
+        return False, "Entry / SL / Position ناقص است."
+
+    if side == "BUY" and sl >= entry:
+        return False, "برای BUY، استاپ باید پایین‌تر از Entry باشد."
+
+    if side == "SELL" and sl <= entry:
+        return False, "برای SELL، استاپ باید بالاتر از Entry باشد."
+
+    return True, "OK"
+
+
+def calculate_dry_run(signal):
+    entry = signal["entry"]
+    sl = signal["stop_loss"]
+
+    risk_amount = ACCOUNT_BALANCE * (RISK_PERCENT / 100)
+
+    stop_distance = abs(entry - sl)
+    stop_percent = (stop_distance / entry) * 100
+
+    if stop_distance <= 0:
+        return None
+
+    notional_size = risk_amount / (stop_distance / entry)
+    estimated_margin = notional_size / LEVERAGE
+
+    return {
+        "balance": ACCOUNT_BALANCE,
+        "risk_percent": RISK_PERCENT,
+        "risk_amount": round(risk_amount, 2),
+        "leverage": LEVERAGE,
+        "stop_percent": round(stop_percent, 4),
+        "notional_size": round(notional_size, 2),
+        "estimated_margin": round(estimated_margin, 2)
+    }
+
+
 def send_telegram_message(chat_id, text):
     if not BOT_TOKEN:
         return
@@ -62,6 +109,7 @@ def send_telegram_message(chat_id, text):
 def home():
     return jsonify({
         "status": "ok",
+        "mode": "DRY_RUN",
         "message": "TroTrade Signal API is running"
     })
 
@@ -95,27 +143,64 @@ def telegram_webhook():
         return jsonify({"status": "no text"})
 
     signal = parse_signal(text)
-
     chat_id = message.get("chat", {}).get("id")
 
-    if signal.get("pair") and signal.get("position"):
+    if not signal.get("pair") or not signal.get("position"):
+        return jsonify({
+            "status": "not_signal",
+            "signal": signal
+        })
 
+    valid, reason = validate_signal(signal)
+
+    if not valid:
         reply = (
-            f"✅ Signal detected\n\n"
+            "⚠️ SIGNAL REJECTED\n\n"
             f"ID: {signal.get('signal_id', '-')}\n"
-            f"Pair: {signal.get('pair')}\n"
-            f"Position: {signal.get('position')}\n"
+            f"Pair: {signal.get('pair', '-')}\n"
+            f"Position: {signal.get('position', '-')}\n"
             f"Entry: {signal.get('entry', '-')}\n"
-            f"SL: {signal.get('stop_loss', '-')}\n"
-            f"TPs: {signal.get('take_profits', [])}"
+            f"SL: {signal.get('stop_loss', '-')}\n\n"
+            f"❌ {reason}\n\n"
+            "هیچ معامله‌ای انجام نشد."
         )
 
         if chat_id:
             send_telegram_message(chat_id, reply)
 
+        return jsonify({
+            "status": "rejected",
+            "reason": reason,
+            "signal": signal
+        })
+
+    dry_run = calculate_dry_run(signal)
+
+    reply = (
+        "🧪 DRY RUN — NO ORDER PLACED\n\n"
+        f"ID: {signal.get('signal_id', '-')}\n"
+        f"Pair: {signal.get('pair')}\n"
+        f"Position: {signal.get('position')}\n"
+        f"Entry: {signal.get('entry')}\n"
+        f"SL: {signal.get('stop_loss')}\n"
+        f"TPs: {signal.get('take_profits', [])}\n\n"
+        f"Balance: {dry_run['balance']} USDT\n"
+        f"Risk: {dry_run['risk_percent']}%\n"
+        f"Max loss: {dry_run['risk_amount']} USDT\n"
+        f"Leverage: {dry_run['leverage']}x\n"
+        f"SL distance: {dry_run['stop_percent']}%\n"
+        f"Position value: {dry_run['notional_size']} USDT\n"
+        f"Estimated margin: {dry_run['estimated_margin']} USDT\n\n"
+        "✅ فقط محاسبه شد؛ هیچ معامله‌ای باز نشده."
+    )
+
+    if chat_id:
+        send_telegram_message(chat_id, reply)
+
     return jsonify({
-        "status": "received",
-        "signal": signal
+        "status": "dry_run",
+        "signal": signal,
+        "calculation": dry_run
     })
 
 
