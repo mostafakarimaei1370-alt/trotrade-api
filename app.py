@@ -13,7 +13,6 @@ DEFAULT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "175"))
 DEFAULT_RISK = float(os.getenv("RISK_PERCENT", "3"))
 DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "20"))
 
-# Estimated fee per side: 0.04%
 FEE_RATE = float(os.getenv("FEE_RATE", "0.0004"))
 
 pending_trades = {}
@@ -31,7 +30,11 @@ def parse_signal(text):
     text = normalize_numbers(text)
     signal = {}
 
-    m = re.search(r"Pair:\s*([A-Z0-9]+)", text, re.I)
+    m = re.search(
+        r"Pair:\s*([A-Z0-9]+)",
+        text,
+        re.I
+    )
     if m:
         signal["pair"] = m.group(1).upper()
 
@@ -145,22 +148,16 @@ def calculate_trade(trade):
         )
     )
 
-    stop_fraction = (
-        abs(entry - sl) / entry
-    )
+    stop_fraction = abs(entry - sl) / entry
 
-    roundtrip_fee_rate = (
-        FEE_RATE * 2
-    )
+    roundtrip_fee_rate = FEE_RATE * 2
 
     manual_margin = trade.get(
         "margin_override"
     )
 
     if manual_margin is not None:
-        margin = float(
-            manual_margin
-        )
+        margin = float(manual_margin)
 
         position_value = (
             margin * leverage
@@ -408,7 +405,6 @@ def handle_command(chat_id, text):
 
         trade["risk_percent"] = value
 
-        # Risk mode overrides manual margin.
         trade.pop(
             "margin_override",
             None
@@ -540,14 +536,14 @@ def home():
         "status": "ok",
         "mode": "DRY_RUN",
         "language": "fa"
-    })
+    }), 200
 
 
 @app.route("/health")
 def health():
     return jsonify({
         "status": "healthy"
-    })
+    }), 200
 
 
 @app.route(
@@ -555,11 +551,10 @@ def health():
     methods=["POST"]
 )
 def telegram_webhook():
+
     if WEBHOOK_SECRET:
-        received = (
-            request.headers.get(
-                "X-Telegram-Bot-Api-Secret-Token"
-            )
+        received = request.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token"
         )
 
         if received != WEBHOOK_SECRET:
@@ -567,12 +562,9 @@ def telegram_webhook():
                 "error": "unauthorized"
             }), 403
 
-    update = (
-        request.get_json(
-            silent=True
-        )
-        or {}
-    )
+    update = request.get_json(
+        silent=True
+    ) or {}
 
     message = (
         update.get("message")
@@ -582,7 +574,7 @@ def telegram_webhook():
     if not message:
         return jsonify({
             "status": "ignored"
-        })
+        }), 200
 
     chat_id = (
         message.get(
@@ -599,7 +591,7 @@ def telegram_webhook():
     if not chat_id or not text:
         return jsonify({
             "status": "no_text"
-        })
+        }), 200
 
     if handle_command(
         chat_id,
@@ -608,7 +600,7 @@ def telegram_webhook():
         return jsonify({
             "status":
             "command_processed"
-        })
+        }), 200
 
     signal = parse_signal(
         text
@@ -620,7 +612,7 @@ def telegram_webhook():
     ):
         return jsonify({
             "status": "not_signal"
-        })
+        }), 200
 
     valid, reason = (
         validate_signal(signal)
@@ -637,7 +629,7 @@ def telegram_webhook():
         return jsonify({
             "status": "rejected",
             "reason": reason
-        })
+        }), 200
 
     signal["balance"] = (
         DEFAULT_BALANCE
@@ -651,4 +643,61 @@ def telegram_webhook():
         DEFAULT_LEVERAGE
     )
 
-   
+    pending_trades[
+        chat_id
+    ] = signal
+
+    send_message(
+        chat_id,
+        "📥 سیگنال جدید دریافت شد.\n\n"
+        + preview(signal)
+    )
+
+    return jsonify({
+        "status": "dry_run",
+        "signal": signal,
+        "calculation":
+        calculate_trade(signal)
+    }), 200
+
+
+def setup_webhook():
+
+    if (
+        not BOT_TOKEN
+        or not RENDER_URL
+        or not WEBHOOK_SECRET
+    ):
+        return
+
+    telegram_url = (
+        "https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/setWebhook"
+    )
+
+    webhook_url = (
+        f"{RENDER_URL}/telegram"
+    )
+
+    try:
+        requests.post(
+            telegram_url,
+            json={
+                "url": webhook_url,
+                "secret_token":
+                WEBHOOK_SECRET
+            },
+            timeout=10
+        )
+    except Exception:
+        pass
+
+
+setup_webhook()
+
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=10000
+    )
